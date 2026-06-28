@@ -37,7 +37,7 @@ struct DashboardHistorySample: Codable, Sendable, Identifiable {
 }
 
 enum DashboardHistoryStore {
-    private static let maxSamples = 360
+    private static let maxSamples = 180
     private static let saveInterval: TimeInterval = 30
     nonisolated(unsafe) private static var lastSaveTime: TimeInterval = 0
 

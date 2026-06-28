@@ -22,17 +22,25 @@ struct AccessoryBatterySnapshot: Identifiable, Hashable, Sendable {
     var symbolName: String {
         if let symbolNameOverride { return symbolNameOverride }
         let lowercasedName = name.lowercased()
-        if lowercasedName.contains("airpods") || lowercasedName.contains("headphone") || lowercasedName.contains("耳机") {
-            return "headphones"
+        // 先判断键盘/鼠标/触控板，避免第三方键盘名称里带有 "BT"、"audio" 等片段时被误判成耳机。
+        if lowercasedName.contains("keyboard") || lowercasedName.contains("键盘") || lowercasedName.contains("x75") || lowercasedName.contains("eweadn") {
+            return "keyboard"
         }
         if lowercasedName.contains("mouse") || lowercasedName.contains("鼠标") {
             return "computermouse"
         }
-        if lowercasedName.contains("keyboard") || lowercasedName.contains("键盘") {
-            return "keyboard"
-        }
-        if lowercasedName.contains("trackpad") || lowercasedName.contains("触控板") {
+        if lowercasedName.contains("trackpad") || lowercasedName.contains("touchpad") || lowercasedName.contains("触控板") {
             return "rectangle.and.hand.point.up.left"
+        }
+        if lowercasedName.contains("iphone") || lowercasedName.contains("phone") || lowercasedName.contains("手机") {
+            return "iphone"
+        }
+        if lowercasedName.contains("ipad") || lowercasedName.contains("平板") {
+            return "ipad"
+        }
+        let audioFragments = ["airpods", "beats", "headphone", "headphones", "headset", "earbud", "earbuds", "audio", "buds", "freebuds", "galaxy buds", "soundcore", "bose", "sony wf", "sony wh", "jabra", "marshall", "nothing ear", "耳机", "蓝牙音频"]
+        if audioFragments.contains(where: { lowercasedName.contains($0) }) {
+            return "headphones"
         }
         return "dot.radiowaves.left.and.right"
     }
@@ -113,7 +121,9 @@ enum BatteryMonitor {
 
     nonisolated static func snapshot() -> BatterySnapshot {
         let now = ProcessInfo.processInfo.systemUptime
-        refreshAccessoryBatteriesIfNeeded(now: now)
+        if MonitorRefreshMode.current == .foreground {
+            refreshAccessoryBatteriesIfNeeded(now: now)
+        }
         let powerSignature = currentPowerStateSignature()
 
         cacheLock.lock()
@@ -270,22 +280,26 @@ enum BatteryMonitor {
         return (primary + secondary).filter { device in
             seenNames.insert(device.name).inserted
         }
-        .prefix(3)
+        .prefix(1)
         .map { $0 }
     }
 
     nonisolated private static func readAccessoryBatteries() -> [AccessoryBatterySnapshot] {
         let now = ProcessInfo.processInfo.systemUptime
-        refreshAccessoryBatteriesIfNeeded(now: now)
+        if MonitorRefreshMode.current == .foreground {
+            refreshAccessoryBatteriesIfNeeded(now: now)
+        }
 
         cacheLock.lock()
         let accessories = cachedAccessories
         cacheLock.unlock()
 
-        return accessories
+        return Array(accessories.prefix(1))
     }
 
     nonisolated private static func refreshAccessoryBatteriesIfNeeded(now: TimeInterval) {
+        guard MonitorRefreshMode.current == .foreground else { return }
+
         cacheLock.lock()
         if now - cachedAccessoriesTime < MonitorRefreshMode.current.interval {
             cacheLock.unlock()
@@ -312,22 +326,25 @@ enum BatteryMonitor {
     }
 
     nonisolated private static func performAccessoryBatteryScan() -> [AccessoryBatterySnapshot] {
+        let connectedNames = connectedBluetoothDeviceNames()
         let devices = readAccessoryBatteriesFromHIDManager()
         + readAccessoryBatteriesFromIOBluetooth()
-        + BluetoothAccessoryBatteryScanner.shared.cachedAccessories()
+        + BluetoothAccessoryBatteryScanner.shared.cachedAccessories(connectedNames: connectedNames)
         + [
             "AppleBluetoothHIDKeyboard",
             "AppleBluetoothHIDMouse",
             "BNBMouseDevice",
             "BNBKeyboardDevice",
-            "AppleHSBluetoothDevice"
+            "AppleHSBluetoothDevice",
+            "IOBluetoothHIDDriver",
+            "IOBluetoothDevice"
         ]
         .flatMap { readAccessoryBatteriesFromRegistry(className: $0) }
         var seenNames = Set<String>()
         let accessories = devices.filter { device in
             seenNames.insert(device.name).inserted
         }
-        .prefix(3)
+        .prefix(1)
         .map { $0 }
 
         return accessories
@@ -347,11 +364,12 @@ enum BatteryMonitor {
 
         var devices: [AccessoryBatterySnapshot] = []
         var seenNames = Set<String>()
+        let connectedNames = connectedBluetoothDeviceNames()
 
         for device in hidDevices {
             let dictionary = hidAccessoryDictionary(for: device)
             guard let name = accessoryName(from: dictionary),
-                  isExternalBatteryDevice(dictionary: dictionary, name: name),
+                  isExternalBatteryDevice(dictionary: dictionary, name: name) || connectedNames.contains(normalizedAccessoryDeviceName(name)),
                   let percentage = batteryPercentage(from: dictionary) ?? batteryPercentageFromHIDElements(device)
             else {
                 continue
@@ -362,8 +380,25 @@ enum BatteryMonitor {
 
         return devices
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-            .prefix(3)
+            .prefix(1)
             .map { $0 }
+    }
+
+    nonisolated private static func connectedBluetoothDeviceNames() -> Set<String> {
+        guard let devices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else { return [] }
+        return Set(devices.compactMap { device in
+            guard device.isConnected() else { return nil }
+            let name = (device.name ?? device.nameOrAddress ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? nil : normalizedAccessoryDeviceName(name)
+        })
+    }
+
+    nonisolated fileprivate static func normalizedAccessoryDeviceName(_ name: String) -> String {
+        name.lowercased()
+            .replacingOccurrences(of: "’", with: "'")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     nonisolated private static func readAccessoryBatteriesFromIOBluetooth() -> [AccessoryBatterySnapshot] {
@@ -394,7 +429,19 @@ enum BatteryMonitor {
             "batteryLevel",
             "batteryPower",
             "batteryPercentCombined",
-            "deviceBatteryPercent"
+            "batteryPercentLeft",
+            "batteryPercentRight",
+            "batteryPercentCase",
+            "batteryLevelLeft",
+            "batteryLevelRight",
+            "batteryLevelCase",
+            "deviceBatteryPercent",
+            "deviceBatteryLevel",
+            "getBatteryPercent",
+            "getBatteryLevel",
+            "batteryInfo",
+            "batteryStatus",
+            "powerSource"
         ]
 
         for selectorName in selectors {
@@ -402,6 +449,12 @@ enum BatteryMonitor {
             guard device.responds(to: selector) else { continue }
             let value = batteryValue(from: device, selector: selector)
             if let percentage = positiveInt(from: value, maxValue: 100) {
+                return percentage
+            }
+            if let dictionary = value as? [String: Any], let percentage = batteryPercentage(from: dictionary) {
+                return percentage
+            }
+            if let dictionary = value as? NSDictionary, let percentage = batteryPercentage(from: dictionary as? [String: Any] ?? [:]) {
                 return percentage
             }
         }
@@ -425,6 +478,10 @@ enum BatteryMonitor {
             return intReturnValue(from: object, selector: selector)
         }
 
+        if ["f", "d"].contains(type) {
+            return doubleReturnValue(from: object, selector: selector, type: type)
+        }
+
         return nil
     }
 
@@ -433,6 +490,21 @@ enum BatteryMonitor {
         let implementation = object.method(for: selector)
         let function = unsafeBitCast(implementation, to: MessageSendInt.self)
         let value = Int(function(object, selector))
+        return value > 0 ? value : nil
+    }
+
+    nonisolated private static func doubleReturnValue(from object: AnyObject, selector: Selector, type: String) -> Double? {
+        let implementation = object.method(for: selector)
+        if type == "f" {
+            typealias MessageSendFloat = @convention(c) (AnyObject, Selector) -> Float
+            let function = unsafeBitCast(implementation, to: MessageSendFloat.self)
+            let value = Double(function(object, selector))
+            return value > 0 ? value : nil
+        }
+
+        typealias MessageSendDouble = @convention(c) (AnyObject, Selector) -> Double
+        let function = unsafeBitCast(implementation, to: MessageSendDouble.self)
+        let value = function(object, selector)
         return value > 0 ? value : nil
     }
 
@@ -524,6 +596,7 @@ enum BatteryMonitor {
 
         var devices: [AccessoryBatterySnapshot] = []
         var seenNames = Set<String>()
+        let connectedNames = connectedBluetoothDeviceNames()
         var inspectedServiceCount = 0
 
         while true {
@@ -539,7 +612,7 @@ enum BatteryMonitor {
             guard let dictionary = accessoryDictionary(for: service),
                   let percentage = batteryPercentage(from: dictionary),
                   let name = accessoryName(from: dictionary),
-                  isExternalBatteryDevice(dictionary: dictionary, name: name)
+                  isExternalBatteryDevice(dictionary: dictionary, name: name) || connectedNames.contains(normalizedAccessoryDeviceName(name))
             else {
                 continue
             }
@@ -549,7 +622,7 @@ enum BatteryMonitor {
             devices.append(AccessoryBatterySnapshot(name: name, percentage: percentage, symbolNameOverride: accessorySymbolName(from: dictionary, name: name)))
         }
 
-        return Array(devices.prefix(3))
+        return Array(devices.prefix(1))
     }
 
     nonisolated private static func accessoryDictionary(for service: io_registry_entry_t) -> [String: Any]? {
@@ -665,7 +738,7 @@ enum BatteryMonitor {
         return nil
     }
 
-    nonisolated private static func accessorySymbolName(from dictionary: [String: Any], name: String) -> String? {
+    nonisolated fileprivate static func accessorySymbolName(from dictionary: [String: Any], name: String) -> String? {
         let usagePage = positiveInt(from: dictionary[String(kIOHIDPrimaryUsagePageKey)])
             ?? positiveInt(from: dictionary["PrimaryUsagePage"])
         let usage = positiveInt(from: dictionary[String(kIOHIDPrimaryUsageKey)])
@@ -685,14 +758,25 @@ enum BatteryMonitor {
         }
 
         let lowercasedName = name.lowercased()
-        if lowercasedName.contains("keyboard") || lowercasedName.contains("键盘") {
+        let descriptorText = (dictionary["BluetoothServices"] as? String ?? "")
+            .appending(" ")
+            .appending(dictionary.map { "\($0.key) \($0.value)" }.joined(separator: " "))
+            .lowercased()
+
+        if lowercasedName.contains("keyboard") || lowercasedName.contains("键盘") || lowercasedName.contains("x75") || lowercasedName.contains("eweadn") {
             return "keyboard"
         }
         if lowercasedName.contains("mouse") || lowercasedName.contains("鼠标") {
             return "computermouse"
         }
-        if lowercasedName.contains("trackpad") || lowercasedName.contains("触控板") {
+        if lowercasedName.contains("trackpad") || lowercasedName.contains("touchpad") || lowercasedName.contains("触控板") {
             return "rectangle.and.hand.point.up.left"
+        }
+        if lowercasedName.contains("iphone") || lowercasedName.contains("phone") || lowercasedName.contains("手机") || descriptorText.contains("phone") || descriptorText.contains("pbap") || descriptorText.contains("handsfree audio gateway") {
+            return "iphone"
+        }
+        if lowercasedName.contains("ipad") || lowercasedName.contains("平板") {
+            return "ipad"
         }
         let audioFragments = [
             "airpods",
@@ -705,11 +789,20 @@ enum BatteryMonitor {
             "audio",
             "stereo",
             "a2dp",
-            "bt1",
+            "buds",
+            "freebuds",
+            "galaxy buds",
+            "soundcore",
+            "bose",
+            "sony wf",
+            "sony wh",
+            "jabra",
+            "marshall",
+            "nothing ear",
             "耳机",
             "蓝牙音频"
         ]
-        if audioFragments.contains(where: { lowercasedName.contains($0) }) {
+        if audioFragments.contains(where: { lowercasedName.contains($0) || descriptorText.contains($0) }) {
             return "headphones"
         }
         return nil
@@ -968,12 +1061,17 @@ private final class BluetoothAccessoryBatteryScanner: NSObject, CBCentralManager
     nonisolated(unsafe) private var isScanning = false
     nonisolated(unsafe) private var discovered: [String: AccessoryBatterySnapshot] = [:]
     nonisolated(unsafe) private var connectedPeripherals: [UUID: CBPeripheral] = [:]
+    nonisolated(unsafe) private var allowedConnectedNames: Set<String> = []
 
-    nonisolated func cachedAccessories() -> [AccessoryBatterySnapshot] {
+    nonisolated func cachedAccessories(connectedNames: Set<String>) -> [AccessoryBatterySnapshot] {
         let now = ProcessInfo.processInfo.systemUptime
         lock.lock()
-        let current = cached
-        let shouldRefresh = !isScanning && now - lastRefreshStartedAt >= MonitorRefreshMode.current.interval
+        allowedConnectedNames = connectedNames
+        let current = cached.filter { connectedNames.contains(BatteryMonitor.normalizedAccessoryDeviceName($0.name)) }
+        let shouldRefresh = MonitorRefreshMode.current == .foreground
+            && !connectedNames.isEmpty
+            && !isScanning
+            && now - lastRefreshStartedAt >= MonitorRefreshMode.current.interval
         if shouldRefresh {
             lastRefreshStartedAt = now
             isScanning = true
@@ -990,6 +1088,11 @@ private final class BluetoothAccessoryBatteryScanner: NSObject, CBCentralManager
     }
 
     nonisolated private func startScanOnQueue() {
+        guard MonitorRefreshMode.current == .foreground else {
+            finishScan()
+            return
+        }
+
         if central == nil {
             central = CBCentralManager(
                 delegate: self,
@@ -999,13 +1102,17 @@ private final class BluetoothAccessoryBatteryScanner: NSObject, CBCentralManager
             return
         }
 
-        guard central?.state == .poweredOn else {
+        guard let central, central.state == .poweredOn else {
             finishScan()
             return
         }
 
         discovered.removeAll()
         readConnectedBatteryServicePeripherals()
+        central.scanForPeripherals(
+            withServices: [Self.batteryServiceUUID],
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+        )
 
         queue.asyncAfter(deadline: .now() + scanDuration) { [weak self] in
             self?.finishScan()
@@ -1013,6 +1120,10 @@ private final class BluetoothAccessoryBatteryScanner: NSObject, CBCentralManager
     }
 
     nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        guard MonitorRefreshMode.current == .foreground else {
+            finishScan()
+            return
+        }
         guard central.state == .poweredOn else {
             finishScan()
             return
@@ -1030,7 +1141,22 @@ private final class BluetoothAccessoryBatteryScanner: NSObject, CBCentralManager
         }
     }
 
+    nonisolated func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
+        guard MonitorRefreshMode.current == .foreground else { return }
+
+        let advertisedName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
+            ?? peripheral.name
+            ?? ""
+        let normalizedName = BatteryMonitor.normalizedAccessoryDeviceName(advertisedName)
+        guard !normalizedName.isEmpty, allowedConnectedNames.contains(normalizedName) else { return }
+
+        connectedPeripherals[peripheral.identifier] = peripheral
+        peripheral.delegate = self
+        central.connect(peripheral, options: nil)
+    }
+
     nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+
         peripheral.delegate = self
         peripheral.discoverServices([Self.batteryServiceUUID])
     }
@@ -1067,12 +1193,24 @@ private final class BluetoothAccessoryBatteryScanner: NSObject, CBCentralManager
         let percentage = min(max(Int(firstByte), 0), 100)
         guard percentage > 0 else { return }
 
-        let name = (peripheral.name?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+        let name = matchingConnectedName(for: peripheral)
+            ?? (peripheral.name?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
             ?? "蓝牙设备"
-        discovered[name] = AccessoryBatterySnapshot(name: name, percentage: percentage)
+        guard allowedConnectedNames.contains(BatteryMonitor.normalizedAccessoryDeviceName(name)) else { return }
+        discovered[name] = AccessoryBatterySnapshot(name: name, percentage: percentage, symbolNameOverride: BatteryMonitor.accessorySymbolName(from: ["Transport": "Bluetooth"], name: name))
+    }
+
+    nonisolated private func matchingConnectedName(for peripheral: CBPeripheral) -> String? {
+        let peripheralName = BatteryMonitor.normalizedAccessoryDeviceName(peripheral.name ?? "")
+        if !peripheralName.isEmpty, allowedConnectedNames.contains(peripheralName) {
+            return peripheral.name
+        }
+        guard allowedConnectedNames.count == 1 else { return nil }
+        return allowedConnectedNames.first
     }
 
     nonisolated private func finishScan() {
+
         central?.stopScan()
         connectedPeripherals.values.forEach { central?.cancelPeripheralConnection($0) }
         connectedPeripherals.removeAll()
@@ -1080,7 +1218,7 @@ private final class BluetoothAccessoryBatteryScanner: NSObject, CBCentralManager
         lock.lock()
         cached = Array(discovered.values)
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-            .prefix(3)
+            .prefix(1)
             .map { $0 }
         isScanning = false
         lock.unlock()

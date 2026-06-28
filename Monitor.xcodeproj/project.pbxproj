@@ -421,17 +421,17 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
-					OTHER_LDFLAGS = (
-						"$(inherited)",
-						"-framework",
-						CoreWLAN,
-						"-framework",
-						AudioToolbox,
-						"-framework",
-						CoreBluetooth,
-						"-framework",
-						IOBluetooth,
-					);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					CoreWLAN,
+					"-framework",
+					AudioToolbox,
+					"-framework",
+					CoreBluetooth,
+					"-framework",
+					IOBluetooth,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = Chananyah.Monitor;
 				PRODUCT_NAME = Monitor;
 				REGISTER_APP_GROUPS = YES;
@@ -474,17 +474,17 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
-					OTHER_LDFLAGS = (
-						"$(inherited)",
-						"-framework",
-						CoreWLAN,
-						"-framework",
-						AudioToolbox,
-						"-framework",
-						CoreBluetooth,
-						"-framework",
-						IOBluetooth,
-					);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					CoreWLAN,
+					"-framework",
+					AudioToolbox,
+					"-framework",
+					CoreBluetooth,
+					"-framework",
+					IOBluetooth,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = Chananyah.Monitor;
 				PRODUCT_NAME = Monitor;
 				REGISTER_APP_GROUPS = YES;

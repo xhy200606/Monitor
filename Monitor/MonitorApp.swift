@@ -19,6 +19,11 @@ enum MonitorPanelLifecycleNotification {
     static let didClose = Notification.Name("MonitorPanelDidClose")
 }
 
+enum MonitorPanelSizeNotification {
+    static let didChangeHeight = Notification.Name("MonitorPanelHeightDidChange")
+    static let heightKey = "height"
+}
+
 @main
 struct MonitorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -71,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var globalEventMonitor: Any?
     private var localEventMonitor: Any?
     private var isPanelClosing = false
+    private var currentPanelHeight = MonitorPanelLayout.panelHeight
     /// 每次发起关闭动画递增；完成回调仅在同代次时执行 orderOut，避免取消关闭后仍被隐藏。
     private var closeAnimationGeneration: UInt = 0
     private let monitorViewModel = SystemMonitorViewModel()
@@ -85,6 +91,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hideDefaultSwiftUIWindows()
         configurePanel()
         configureStatusItem()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(statusBarIconDidChange),
+            name: .monitorStatusBarIconDidChange,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(panelHeightDidChange),
+            name: MonitorPanelSizeNotification.didChangeHeight,
+            object: nil
+        )
         configureScreenClean()
         configureTypeRacing()
         monitorViewModel.startMonitoring(mode: .background, fireImmediately: true)
@@ -154,14 +172,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configurePanel() {
         let rootView = ContentView(viewModel: monitorViewModel)
-            .frame(width: MonitorPanelLayout.panelWidth, height: MonitorPanelLayout.panelHeight)
+            .frame(width: MonitorPanelLayout.panelWidth)
             .clipShape(MonitorTheme.scaledPanelShape)
 
         let panel = FloatingPanel.makeBorderless(
             contentRect: NSRect(
                 x: 0, y: 0,
                 width: MonitorPanelLayout.panelWidth,
-                height: MonitorPanelLayout.panelHeight
+                height: currentPanelHeight
             )
         )
         panel.level = .popUpMenu
@@ -175,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configureStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            button.image = Self.statusBarVisionProImage()
+            button.image = Self.statusBarImage(for: MonitorPreferencesService.statusBarIcon())
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleNone
             button.toolTip = nil
@@ -206,29 +224,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private static func statusBarVisionProImage() -> NSImage? {
-        let symbolPointSize: CGFloat = 14
-        let canvasHeight: CGFloat = 18
-        let horizontalPadding: CGFloat = 1.5
-        let configuration = NSImage.SymbolConfiguration(pointSize: symbolPointSize, weight: .heavy)
-        guard let symbol = NSImage(systemSymbolName: "visionpro", accessibilityDescription: "Monitor")?
-            .withSymbolConfiguration(configuration) else {
-            return nil
+    @objc private func statusBarIconDidChange() {
+        statusItem?.button?.image = Self.statusBarImage(for: MonitorPreferencesService.statusBarIcon())
+    }
+
+    @objc private func panelHeightDidChange(_ notification: Notification) {
+        guard let height = notification.userInfo?[MonitorPanelSizeNotification.heightKey] as? CGFloat else { return }
+        let newHeight = max(320, height.rounded(.toNearestOrAwayFromZero))
+        guard abs(newHeight - currentPanelHeight) > 0.5 else { return }
+        currentPanelHeight = newHeight
+        resizePanel(toHeight: newHeight)
+    }
+
+    private func resizePanel(toHeight height: CGFloat) {
+        guard let panel else { return }
+        let width = MonitorPanelLayout.panelWidth
+        if let hostingView = panel.contentViewController?.view {
+            hostingView.setFrameSize(NSSize(width: width, height: height))
+        }
+        let currentFrame = panel.frame
+        let topY = panel.isVisible ? currentFrame.maxY : currentFrame.origin.y + currentFrame.height
+        panel.setFrame(NSRect(x: currentFrame.origin.x, y: topY - height, width: width, height: height), display: panel.isVisible)
+    }
+
+    private static func statusBarImage(for preset: StatusBarIconPreset) -> NSImage? {
+let candidateURLs = [
+    Bundle.main.url(forResource: preset.resourceName, withExtension: "png", subdirectory: "StatusBarIcons"),
+    Bundle.main.url(forResource: preset.resourceName, withExtension: "png", subdirectory: "Resources/StatusBarIcons"),
+    Bundle.main.url(forResource: preset.resourceName, withExtension: "png"),
+    Bundle.main.url(forResource: preset.resourceName, withExtension: "eps", subdirectory: "StatusBarIcons"),
+    Bundle.main.url(forResource: preset.resourceName, withExtension: "eps", subdirectory: "Resources/StatusBarIcons"),
+    Bundle.main.url(forResource: preset.resourceName, withExtension: "eps")
+]
+        guard let url = candidateURLs.compactMap({ $0 }).first,
+              let source = NSImage(contentsOf: url) else {
+            return fallbackStatusBarImage()
         }
 
-        let canvasWidth = symbol.size.width + horizontalPadding * 2
-        let drawRect = NSRect(
-            x: horizontalPadding,
-            y: (canvasHeight - symbol.size.height) / 2,
-            width: symbol.size.width,
-            height: symbol.size.height
-        )
-
-        let image = NSImage(size: NSSize(width: canvasWidth, height: canvasHeight), flipped: false) { _ in
-            symbol.draw(in: drawRect)
+        let targetHeight: CGFloat = 18
+        let scale = targetHeight / max(source.size.height, 1)
+        let targetWidth = max(18, source.size.width * scale)
+        let image = NSImage(size: NSSize(width: targetWidth, height: targetHeight), flipped: false) { rect in
+            source.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
             return true
         }
         image.isTemplate = true
+        return image
+    }
+
+    private static func fallbackStatusBarImage() -> NSImage? {
+        let configuration = NSImage.SymbolConfiguration(pointSize: 14, weight: .heavy)
+        let image = NSImage(systemSymbolName: "chart.line.uptrend.xyaxis", accessibilityDescription: "Monitor")?
+            .withSymbolConfiguration(configuration)
+        image?.isTemplate = true
         return image
     }
 
@@ -328,11 +376,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let buttonRect = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
         var panelX = buttonRect.midX - MonitorPanelLayout.panelWidth / 2
         guard let screen = buttonWindow.screen ?? NSScreen.main else {
-            return NSPoint(x: panelX, y: buttonRect.minY - MonitorPanelLayout.panelHeight)
+            return NSPoint(x: panelX, y: buttonRect.minY - currentPanelHeight)
         }
         let visibleFrame = screen.visibleFrame
         panelX = max(visibleFrame.minX + 8, min(panelX, visibleFrame.maxX - MonitorPanelLayout.panelWidth - 8))
-        let panelY = visibleFrame.maxY - MonitorPanelLayout.panelHeight
+        let panelY = visibleFrame.maxY - currentPanelHeight
         return NSPoint(x: panelX, y: panelY)
     }
 

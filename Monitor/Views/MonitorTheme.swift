@@ -7,7 +7,7 @@ enum MonitorPanelLayout {
     static let scale: CGFloat = 1.0
 
     static let designWidth: CGFloat = 360
-    static let designHeight: CGFloat = 839
+    static let designHeight: CGFloat = 815
 
     static var panelWidth: CGFloat { (designWidth * scale).rounded(.toNearestOrAwayFromZero) }
     static var panelHeight: CGFloat { (designHeight * scale).rounded(.toNearestOrAwayFromZero) }
@@ -24,7 +24,8 @@ enum MonitorPanelLayout {
         (designWidth - (contentPadding * 2) - cardSpacing) / 2
     static let metricCardHeight: CGFloat = 124
     static let batteryCardHeight: CGFloat = 126
-    static let batteryAccessoryBarHeight: CGFloat = 25
+    static let batteryAccessoryRowHeight: CGFloat = 25
+    static let batteryAccessoryRowSpacing: CGFloat = 5
     static let processCardHeight: CGFloat = 154
     static let footerActionsHeight: CGFloat = 0
     static let topGridCardHeight: CGFloat = metricCardHeight

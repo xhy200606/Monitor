@@ -8,10 +8,12 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var liveSystemColorScheme = Self.currentSystemColorScheme()
     @State private var launchAtLoginEnabled = false
+    @State private var panelIsActive = false
 
     @AppStorage(DashboardAppearanceStorage.appearanceKey) private var appearanceModeRaw = DashboardAppearanceMode.system.rawValue
     @AppStorage(DashboardAppearanceStorage.themeKey) private var themeStyleRaw = DashboardThemeStyle.amber.rawValue
     @AppStorage(DashboardAppearanceStorage.accentKey) private var accentStyleRaw = DashboardAccentStyle.mint.rawValue
+    @AppStorage(MonitorPreferencesService.statusBarIconKey) private var statusBarIconRaw = StatusBarIconPreset.siameseCat.rawValue
     @AppStorage(MonitorPreferencesService.powerRefreshIntervalKey) private var powerRefreshInterval = MonitorPreferencesService.defaultPowerRefreshInterval
     @AppStorage(MonitorPreferencesService.bluetoothRefreshIntervalKey) private var bluetoothRefreshInterval = MonitorPreferencesService.defaultBluetoothRefreshInterval
 
@@ -25,6 +27,10 @@ struct ContentView: View {
 
     private var accentStyle: DashboardAccentStyle {
         DashboardAccentStyle(rawValue: accentStyleRaw) ?? .mint
+    }
+
+    private var statusBarIcon: StatusBarIconPreset {
+        StatusBarIconPreset(rawValue: statusBarIconRaw) ?? .siameseCat
     }
 
     private var resolvedColorScheme: ColorScheme {
@@ -63,7 +69,7 @@ struct ContentView: View {
         .animation(.spring(response: 0.24, dampingFraction: 0.88), value: showSettings)
         .environment(\.dashboardPalette, palette)
         .preferredColorScheme(appearanceMode.preferredColorScheme)
-        .frame(width: MonitorPanelLayout.designWidth, height: MonitorPanelLayout.designHeight)
+        .frame(width: MonitorPanelLayout.designWidth, height: adaptivePanelHeight)
         .clipShape(MonitorTheme.panelShape)
         .overlay(
             MonitorTheme.panelShape
@@ -80,7 +86,11 @@ struct ContentView: View {
             liveSystemColorScheme = Self.currentSystemColorScheme()
             launchAtLoginEnabled = LaunchAtLoginService.isEnabled
             applyDashboardAppearance()
+            notifyPanelHeight(adaptivePanelHeight)
             dashboard.start(mode: .background, forceRefresh: true)
+        }
+        .onChange(of: adaptivePanelHeight) {
+            notifyPanelHeight(adaptivePanelHeight)
         }
         .onChange(of: appearanceModeRaw) {
             applyDashboardAppearance()
@@ -90,11 +100,13 @@ struct ContentView: View {
             liveSystemColorScheme = Self.currentSystemColorScheme()
         }
         .onReceive(NotificationCenter.default.publisher(for: MonitorPanelLifecycleNotification.didOpen)) { _ in
+            panelIsActive = true
             liveSystemColorScheme = Self.currentSystemColorScheme()
             launchAtLoginEnabled = LaunchAtLoginService.isEnabled
             dashboard.setRefreshMode(.foreground, forceRefresh: true)
         }
         .onReceive(NotificationCenter.default.publisher(for: MonitorPanelLifecycleNotification.didClose)) { _ in
+            panelIsActive = false
             dashboard.setRefreshMode(.background, forceRefresh: false)
         }
     }
@@ -106,6 +118,14 @@ struct ContentView: View {
     @MainActor
     private func applyDashboardAppearance() {
         appearanceMode.applyToApplication()
+    }
+
+    private func notifyPanelHeight(_ height: CGFloat) {
+        NotificationCenter.default.post(
+            name: MonitorPanelSizeNotification.didChangeHeight,
+            object: nil,
+            userInfo: [MonitorPanelSizeNotification.heightKey: height]
+        )
     }
 }
 
@@ -282,7 +302,8 @@ private extension ContentView {
                 PowerFlowView(
                     flow: dashboard.batteryPowerFlow,
                     stateText: dashboard.batteryPowerStateDisplay,
-                    batteryDisplay: dashboard.batteryDisplay
+                    batteryDisplay: dashboard.batteryDisplay,
+                    isActive: panelIsActive
                 )
 
                 if !dashboard.accessoryBatteries.isEmpty {
@@ -290,7 +311,7 @@ private extension ContentView {
                 }
             }
         }
-        .frame(height: MonitorPanelLayout.batteryCardHeight + (dashboard.accessoryBatteries.isEmpty ? 0 : MonitorPanelLayout.batteryAccessoryBarHeight))
+        .frame(height: batterySectionHeight)
     }
 
     var processSection: some View {
@@ -309,11 +330,11 @@ private extension ContentView {
                     Text("CPU")
                         .font(MonitorFont.helvetica(size: 10))
                         .foregroundStyle(palette.secondaryText)
-                        .frame(width: 54, alignment: .trailing)
+                        .frame(width: 62, alignment: .trailing)
                     Text("内存")
                         .font(MonitorFont.heiti(size: 10))
                         .foregroundStyle(palette.secondaryText)
-                        .frame(width: 54, alignment: .trailing)
+                        .frame(width: 62, alignment: .trailing)
                     Color.clear
                         .frame(width: 22, height: 1)
                 }
@@ -388,6 +409,15 @@ private extension ContentView {
                     }
                 }
 
+                SettingsOptionRow(title: "状态栏图标") {
+                    ForEach(StatusBarIconPreset.allCases) { icon in
+                        StatusBarIconOption(icon: icon, selected: statusBarIcon == icon) {
+                            MonitorPreferencesService.saveStatusBarIcon(icon)
+                            statusBarIconRaw = icon.rawValue
+                        }
+                    }
+                }
+
                 SettingsToggleRow(title: "开机启动", symbol: "power", isOn: launchAtLoginEnabled) {
                     let targetValue = !launchAtLoginEnabled
                     if LaunchAtLoginService.setEnabled(targetValue) {
@@ -451,6 +481,23 @@ private extension ContentView {
 
     var statusColor: Color {
         dashboard.healthScore >= 80 ? palette.accent : dashboard.healthScore >= 55 ? palette.orange : palette.red
+    }
+
+    var accessoryBatteryListHeight: CGFloat {
+        AccessoryBatteryBars.height(for: dashboard.accessoryBatteries.count)
+    }
+
+    var batterySectionHeight: CGFloat {
+        MonitorPanelLayout.batteryCardHeight + accessoryBatteryListHeight
+    }
+
+    var adaptivePanelHeight: CGFloat {
+        MonitorPanelLayout.contentPadding * 2
+            + MonitorPanelLayout.headerHeight
+            + MonitorPanelLayout.monitorCardsHeight
+            + batterySectionHeight
+            + processCardHeight
+            + MonitorPanelLayout.cardSpacing * 3
     }
 
     var processCardHeight: CGFloat {
@@ -877,17 +924,17 @@ private struct ProcessRow: View {
                 .font(MonitorFont.helvetica(size: 10.5, bold: true))
                 .foregroundStyle(process.cpuPercent >= 80 ? palette.red : palette.secondaryText)
                 .monospacedDigit()
-                .frame(width: 54, alignment: .trailing)
+                .frame(width: 62, alignment: .trailing)
             Text(process.memoryDisplay)
                 .font(MonitorFont.helvetica(size: 10.5, bold: true))
                 .foregroundStyle(palette.secondaryText)
                 .monospacedDigit()
-                .frame(width: 54, alignment: .trailing)
+                .frame(width: 62, alignment: .trailing)
             Button(action: onTerminate) {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 12, weight: .heavy))
                     .foregroundStyle(palette.tertiaryText)
-                    .frame(width: 22, height: 22)
+                    .frame(width: 20, height: 20)
             }
             .buttonStyle(.plain)
         }
@@ -993,17 +1040,18 @@ private struct AccessoryBatteryBars: View {
     let accessories: [AccessoryBatterySnapshot]
 
     var body: some View {
-        HStack(spacing: 7) {
+        VStack(spacing: MonitorPanelLayout.batteryAccessoryRowSpacing) {
             ForEach(accessories) { accessory in
                 HStack(spacing: 6) {
                     Image(systemName: accessory.symbolName)
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(palette.secondaryText)
+                        .frame(width: 14, alignment: .center)
                     Text(accessory.name)
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(palette.secondaryText)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.75)
+                        .minimumScaleFactor(0.72)
                     GeometryReader { proxy in
                         ZStack(alignment: .leading) {
                             Capsule(style: .continuous)
@@ -1018,15 +1066,23 @@ private struct AccessoryBatteryBars: View {
                         .font(MonitorFont.helvetica(size: 9, bold: true))
                         .foregroundStyle(palette.secondaryText)
                         .monospacedDigit()
+                        .frame(width: 30, alignment: .trailing)
                 }
                 .padding(.horizontal, 7)
                 .padding(.vertical, 5)
+                .frame(height: MonitorPanelLayout.batteryAccessoryRowHeight)
                 .background(palette.chipBackground.opacity(0.62))
                 .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 .help("\(accessory.name) \(accessory.percentage)%")
             }
         }
-        .frame(height: MonitorPanelLayout.batteryAccessoryBarHeight)
+        .frame(height: Self.height(for: accessories.count))
+    }
+
+    static func height(for count: Int) -> CGFloat {
+        guard count > 0 else { return 0 }
+        return CGFloat(count) * MonitorPanelLayout.batteryAccessoryRowHeight
+            + CGFloat(max(count - 1, 0)) * MonitorPanelLayout.batteryAccessoryRowSpacing
     }
 }
 
@@ -1035,6 +1091,7 @@ private struct PowerFlowView: View {
     let flow: PowerFlowSnapshot
     let stateText: String
     let batteryDisplay: String
+    let isActive: Bool
 
     var body: some View {
         GeometryReader { proxy in
@@ -1054,7 +1111,8 @@ private struct PowerFlowView: View {
                 SankeyPowerBands(
                     routes: flowRoutes,
                     sourceCount: sourceItems.count,
-                    destinationCount: destinationItems.count
+                    destinationCount: destinationItems.count,
+                    isActive: isActive
                 )
                 .frame(width: bandWidth, height: size.height)
                 .offset(x: bandX, y: 0)
@@ -1098,7 +1156,7 @@ private struct PowerFlowView: View {
     }
 
     private var destinationItems: [PowerEndpointItem] {
-        if flow.isPluggedIn, flow.isActivelyCharging {
+        if shouldShowChargingSplit {
             return [
                 PowerEndpointItem(symbol: "laptopcomputer", label: nil, tint: palette.secondaryText),
                 PowerEndpointItem(symbol: "battery.75", label: batteryLabel, tint: palette.accent)
@@ -1108,13 +1166,19 @@ private struct PowerFlowView: View {
     }
 
     private var flowRoutes: [PowerFlowRoute] {
-        if flow.isPluggedIn, flow.isActivelyCharging {
+        if shouldShowChargingSplit {
             return [
                 PowerFlowRoute(sourceIndex: 0, destinationIndex: 0, watts: flow.systemWatts, powerText: flow.systemWatts.map(formatPower) ?? "直接供电"),
                 PowerFlowRoute(sourceIndex: 0, destinationIndex: 1, watts: flow.batteryWatts, powerText: flow.batteryWatts.map(formatPower) ?? "给电池供电")
             ]
         }
         return [PowerFlowRoute(sourceIndex: 0, destinationIndex: 0, watts: primaryWatts, powerText: primaryPowerText)]
+    }
+
+    private var shouldShowChargingSplit: Bool {
+        guard flow.isPluggedIn, flow.isActivelyCharging else { return false }
+        // 只有真实读到“系统直供”和“电池充电”两路功率时才画桑基分流，避免把普通插电状态误画成分流。
+        return (flow.systemWatts ?? 0) > 0.5 && (flow.batteryWatts ?? 0) > 0.5
     }
 
     private var primaryWatts: Double? {
@@ -1252,59 +1316,303 @@ private struct PowerFlowRoute: Identifiable {
 
 private struct SankeyPowerBands: View {
     @Environment(\.dashboardPalette) private var palette
-    @State private var phase: Double = 0
     let routes: [PowerFlowRoute]
     let sourceCount: Int
     let destinationCount: Int
+    let isActive: Bool
 
     var body: some View {
-        Canvas { context, size in
-            for route in routes {
-                let edges = bandEdges(for: route)
-                let basePath = bandPath(width: size.width, sourceTop: edges.sourceTop, sourceBottom: edges.sourceBottom, destinationTop: edges.destinationTop, destinationBottom: edges.destinationBottom)
-                let minY = min(edges.sourceTop, edges.destinationTop)
-                let maxY = max(edges.sourceBottom, edges.destinationBottom)
-                let midY = (minY + maxY) / 2
-                context.fill(basePath, with: .linearGradient(baseGradient, startPoint: CGPoint(x: 0, y: midY), endPoint: CGPoint(x: size.width, y: midY)))
-                context.stroke(basePath, with: .color(Color.white.opacity(palette.isDark ? 0.16 : 0.42)), lineWidth: 0.6)
+        Group {
+            if isActive {
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { timeline in
+                    let duration = shouldDrawSplitFlow ? 5.4 : 5.0
+                    let phase = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: duration) / duration
 
-                let glowWidth = max(size.width * 0.22, 34)
-                let glowX = -glowWidth + (size.width + glowWidth * 2) * phase
-                var glowContext = context
-                glowContext.clip(to: basePath)
-                glowContext.addFilter(.blur(radius: routes.count == 1 ? 8 : 5))
-                glowContext.fill(
-                    Path(CGRect(x: glowX, y: minY - 10, width: glowWidth, height: maxY - minY + 20)),
-                    with: .linearGradient(glowGradient, startPoint: CGPoint(x: glowX, y: midY), endPoint: CGPoint(x: glowX + glowWidth, y: midY))
-                )
+                    Canvas { context, size in
+                        if shouldDrawSplitFlow {
+                            drawSplitFlow(context: &context, size: size, phase: phase, animated: true)
+                        } else {
+                            drawSimpleFlow(context: &context, size: size, phase: phase, animated: true)
+                        }
+                    }
+                }
+            } else {
+                Canvas { context, size in
+                    if shouldDrawSplitFlow {
+                        drawSplitFlow(context: &context, size: size, phase: 0, animated: false)
+                    } else {
+                        drawSimpleFlow(context: &context, size: size, phase: 0, animated: false)
+                    }
+                }
             }
         }
         .shadow(color: Color.black.opacity(palette.isDark ? 0.24 : 0.14), radius: palette.isDark ? 5 : 8, x: 0, y: palette.isDark ? 2 : 4)
-        .onAppear {
-            phase = 0
-            withAnimation(.linear(duration: 5.2).repeatForever(autoreverses: false)) {
-                phase = 1
+    }
+
+    private var shouldDrawSplitFlow: Bool {
+        routes.count > 1 && sourceCount == 1 && destinationCount > 1
+    }
+
+    private func drawSimpleFlow(context: inout GraphicsContext, size: CGSize, phase: Double, animated: Bool) {
+        for route in routes {
+            let edges = bandEdges(for: route)
+            let basePath = bandPath(width: size.width, sourceTop: edges.sourceTop, sourceBottom: edges.sourceBottom, destinationTop: edges.destinationTop, destinationBottom: edges.destinationBottom)
+            let minY = min(edges.sourceTop, edges.destinationTop)
+            let maxY = max(edges.sourceBottom, edges.destinationBottom)
+            let midY = (minY + maxY) / 2
+
+            drawBase(path: basePath, context: &context, startPoint: CGPoint(x: 0, y: midY), endPoint: CGPoint(x: size.width, y: midY))
+            if animated {
+                drawMovingGlow(in: basePath, context: &context, size: size, minY: minY, maxY: maxY, glowX: glowX(width: size.width, phase: phase), opacity: 1, blurRadius: routes.count == 1 ? 8 : 5)
             }
         }
+    }
+
+    private func drawSplitFlow(context: inout GraphicsContext, size: CGSize, phase: Double, animated: Bool) {
+        let junctionX = max(size.width * 0.36, 42)
+        let fullHeight = max(size.height, 1)
+        let trunkFrame = CGRect(x: 0, y: 0, width: junctionX + 8, height: fullHeight)
+        let trunkPath = Path(roundedRect: trunkFrame, cornerRadius: 12)
+
+        drawBase(path: trunkPath, context: &context, startPoint: CGPoint(x: 0, y: fullHeight / 2), endPoint: CGPoint(x: junctionX, y: fullHeight / 2))
+
+        for route in routes {
+            let frame = proportionalLaneFrame(for: route)
+            let branchPath = splitBranchPath(width: size.width, junctionX: junctionX, destinationTop: frame.minY, destinationBottom: frame.maxY)
+            drawBase(path: branchPath, context: &context, startPoint: CGPoint(x: junctionX, y: frame.midY), endPoint: CGPoint(x: size.width, y: frame.midY), opacity: 0.94)
+        }
+
+        guard animated else { return }
+
+        // 视频里的效果是一块宽幅低透明“扫描光幕”被桑基通道裁剪，而不是小光点或强发光节点。
+        let x = glowX(width: size.width, phase: phase)
+        drawMovingGlow(in: trunkPath, context: &context, size: size, minY: 0, maxY: fullHeight, glowX: x, opacity: 0.78, blurRadius: 10)
+
+        for route in routes {
+            let frame = proportionalLaneFrame(for: route)
+            let branchPath = splitBranchPath(width: size.width, junctionX: junctionX, destinationTop: frame.minY, destinationBottom: frame.maxY)
+            let weight = normalizedWeights[route.id] ?? (1 / CGFloat(max(routes.count, 1)))
+            let routeOpacity = 0.46 + Double(min(max(weight, 0), 1)) * 0.34
+            drawMovingGlow(in: branchPath, context: &context, size: size, minY: frame.minY, maxY: frame.maxY, glowX: x, opacity: routeOpacity, blurRadius: 9)
+        }
+    }
+
+    private func drawBase(path: Path, context: inout GraphicsContext, startPoint: CGPoint, endPoint: CGPoint, opacity: Double = 1) {
+        context.fill(path, with: .color(palette.controlBackground.opacity((palette.isDark ? 0.82 : 0.92) * opacity)))
+        context.fill(path, with: .linearGradient(baseGradient, startPoint: startPoint, endPoint: endPoint))
+        context.stroke(path, with: .color(Color.white.opacity(palette.isDark ? 0.16 : 0.48)), lineWidth: 0.6)
+    }
+
+    private func drawIncomingSplitGlow(in trunkPath: Path, context: inout GraphicsContext, size: CGSize, junctionX: CGFloat, phase: Double) {
+        let splitPhase = 0.42
+        let glowWidth = max(size.width * 0.12, 18)
+        let incomingPhase = min(phase / splitPhase, 1)
+        let x = -glowWidth + (junctionX + glowWidth * 1.15) * incomingPhase
+        let opacity = phase <= splitPhase ? 1.0 : max(0, 1 - (phase - splitPhase) / 0.16)
+        guard opacity > 0.02 else { return }
+
+        let glowRect = Path(CGRect(x: x, y: -10, width: glowWidth, height: size.height + 20))
+        let coreRect = Path(CGRect(x: x + glowWidth * 0.30, y: 7, width: glowWidth * 0.40, height: max(size.height - 14, 10)))
+
+        var haloContext = context
+        haloContext.clip(to: trunkPath)
+        haloContext.addFilter(.blur(radius: 7))
+        haloContext.opacity = palette.isDark ? opacity : min(opacity * 1.15, 1)
+        haloContext.fill(
+            glowRect,
+            with: .linearGradient(glowGradient, startPoint: CGPoint(x: 0, y: size.height / 2), endPoint: CGPoint(x: size.width, y: size.height / 2))
+        )
+
+        var coreContext = context
+        coreContext.clip(to: trunkPath)
+        coreContext.addFilter(.blur(radius: 1.8))
+        coreContext.opacity = palette.isDark ? 0.72 : 0.88
+        coreContext.fill(
+            coreRect,
+            with: .linearGradient(coreGlowGradient, startPoint: CGPoint(x: 0, y: size.height / 2), endPoint: CGPoint(x: size.width, y: size.height / 2))
+        )
+    }
+
+    private func drawBranchGlow(in path: Path, context: inout GraphicsContext, size: CGSize, minY: CGFloat, maxY: CGFloat, junctionX: CGFloat, opacity: Double, weight: CGFloat, phase: Double) {
+        let splitPhase = 0.42
+        let branchPhase = max(0, min((phase - splitPhase) / (1 - splitPhase), 1))
+        guard branchPhase > 0 else { return }
+
+        let glowWidth = max(size.width * (0.075 + min(weight, 0.75) * 0.055), 14)
+        let x = junctionX - glowWidth * 0.8 + (size.width - junctionX + glowWidth * 1.7) * branchPhase
+
+        let glowRect = Path(CGRect(x: x, y: minY - 10, width: glowWidth, height: maxY - minY + 20))
+        let coreRect = Path(CGRect(x: x + glowWidth * 0.30, y: minY + 3, width: glowWidth * 0.42, height: max(maxY - minY - 6, 6)))
+
+        var haloContext = context
+        haloContext.clip(to: path)
+        haloContext.addFilter(.blur(radius: 5.5))
+        haloContext.opacity = palette.isDark ? opacity : min(opacity * 1.12, 1)
+        haloContext.fill(
+            glowRect,
+            with: .linearGradient(glowGradient, startPoint: CGPoint(x: 0, y: (minY + maxY) / 2), endPoint: CGPoint(x: size.width, y: (minY + maxY) / 2))
+        )
+
+        var coreContext = context
+        coreContext.clip(to: path)
+        coreContext.addFilter(.blur(radius: 1.4))
+        coreContext.opacity = (palette.isDark ? 0.62 : 0.82) * opacity
+        coreContext.fill(
+            coreRect,
+            with: .linearGradient(coreGlowGradient, startPoint: CGPoint(x: 0, y: (minY + maxY) / 2), endPoint: CGPoint(x: size.width, y: (minY + maxY) / 2))
+        )
+    }
+
+    private func drawMovingGlow(in path: Path, context: inout GraphicsContext, size: CGSize, minY: CGFloat, maxY: CGFloat, glowX: CGFloat, opacity: Double, blurRadius: CGFloat) {
+        // 颜色不能固定在光幕自身上；光幕滑到通道哪个位置，就应该显示该位置对应的颜色。
+        // 因此这里用“全通道位置取色 + 光幕局部透明尾迹”：左侧更透明，右侧保持正常强度。
+        let glowWidth = max(size.width * 0.66, 96)
+        let haloFrame = CGRect(x: glowX, y: minY - 16, width: glowWidth, height: maxY - minY + 32)
+        let coreFrame = CGRect(x: glowX, y: minY - 7, width: glowWidth, height: maxY - minY + 14)
+
+        drawPositionalScanBand(
+            in: path,
+            context: &context,
+            size: size,
+            frame: haloFrame,
+            opacity: palette.isDark ? opacity : min(opacity * 0.76, 0.70),
+            blurRadius: blurRadius + 1.5,
+            stripCount: 48,
+            baseAlpha: palette.isDark ? 0.48 : 0.36,
+            tailAlpha: 0.10
+        )
+
+        drawPositionalScanBand(
+            in: path,
+            context: &context,
+            size: size,
+            frame: coreFrame,
+            opacity: (palette.isDark ? 0.46 : 0.34) * opacity,
+            blurRadius: 3.4,
+            stripCount: 42,
+            baseAlpha: palette.isDark ? 0.62 : 0.46,
+            tailAlpha: 0.08
+        )
+    }
+
+    private func drawPositionalScanBand(in path: Path, context: inout GraphicsContext, size: CGSize, frame: CGRect, opacity: Double, blurRadius: CGFloat, stripCount: Int, baseAlpha: Double, tailAlpha: Double) {
+        guard frame.width > 1, frame.height > 1 else { return }
+
+        // 光幕的颜色由“右边缘所在的通道位置”决定；光幕内部不再做橙绿蓝彩虹渐变。
+        // 左侧只是同色透明尾迹，右侧保持当前颜色的正常强度。
+        let rightEdgeT = clamp(frame.maxX / max(size.width, 1), lower: 0, upper: 1)
+        let currentColor = positionalScanColor(at: rightEdgeT)
+        let midAlpha = baseAlpha * max(tailAlpha + (1 - tailAlpha) * 0.58, tailAlpha)
+        let highAlpha = baseAlpha * 0.88
+
+        let scanGradient = Gradient(stops: [
+            .init(color: currentColor.opacity(baseAlpha * tailAlpha), location: 0.00),
+            .init(color: currentColor.opacity(midAlpha), location: 0.54),
+            .init(color: currentColor.opacity(highAlpha), location: 0.82),
+            .init(color: currentColor.opacity(baseAlpha), location: 1.00)
+        ])
+
+        var bandContext = context
+        bandContext.clip(to: path)
+        bandContext.addFilter(.blur(radius: blurRadius))
+        bandContext.opacity = opacity
+        bandContext.fill(
+            Path(frame),
+            with: .linearGradient(
+                scanGradient,
+                startPoint: CGPoint(x: frame.minX, y: frame.midY),
+                endPoint: CGPoint(x: frame.maxX, y: frame.midY)
+            )
+        )
+    }
+
+    private func scanLocalAlpha(_ t: CGFloat, tailAlpha: Double) -> Double {
+        // 保留给旧调用语义；当前光幕使用同色透明度渐变，不再逐条分片取色。
+        let eased = smoothstep(edge0: 0.02, edge1: 0.68, x: t)
+        return tailAlpha + (1 - tailAlpha) * Double(eased)
+    }
+
+    private func positionalScanColor(at t: CGFloat) -> Color {
+        let stops: [SIMD3<Double>] = [
+            SIMD3(1.00, 0.54, 0.30),  // orange
+            SIMD3(0.92, 0.86, 0.36),  // yellow green
+            SIMD3(0.38, 0.91, 0.70),  // green
+            SIMD3(0.20, 0.84, 0.78),  // cyan green
+            SIMD3(0.34, 0.58, 1.00)   // blue
+        ]
+        let value = Double(clamp(t, lower: 0, upper: 1))
+        let segmentCount = max(stops.count - 1, 1)
+        let scaled = value * Double(segmentCount)
+        let lowerIndex = min(max(Int(floor(scaled)), 0), segmentCount - 1)
+        let upperIndex = lowerIndex + 1
+
+        // 每两个主色之间按 25 个细分进行平滑差值；再对细分内位置做二次插值，避免颜色跳变。
+        let subdivisions = 25.0
+        let rawLocal = scaled - Double(lowerIndex)
+        let lowerStep = floor(rawLocal * subdivisions) / subdivisions
+        let upperStep = min(lowerStep + 1.0 / subdivisions, 1.0)
+        let intraStep = (rawLocal - lowerStep) / max(upperStep - lowerStep, 0.0001)
+        let eased = intraStep * intraStep * (3 - 2 * intraStep)
+        let steppedLocal = lowerStep + (upperStep - lowerStep) * eased
+
+        let left = stops[lowerIndex]
+        let right = stops[upperIndex]
+        let mixed = left + (right - left) * steppedLocal
+        return Color(red: mixed.x, green: mixed.y, blue: mixed.z)
+    }
+
+    private func smoothstep(edge0: CGFloat, edge1: CGFloat, x: CGFloat) -> CGFloat {
+        let normalized = clamp((x - edge0) / max(edge1 - edge0, 0.0001), lower: 0, upper: 1)
+        return normalized * normalized * (3 - 2 * normalized)
+    }
+
+    private func clamp(_ value: CGFloat, lower: CGFloat, upper: CGFloat) -> CGFloat {
+        min(max(value, lower), upper)
+    }
+
+    private func drawSplitPulse(context: inout GraphicsContext, junctionX: CGFloat, height: CGFloat, phase: Double) {
+        // 分流点不做强发光球，避免和参考视频的柔和扫描光幕不一致。
+    }
+
+    private func glowX(width: CGFloat, phase: Double) -> CGFloat {
+        let glowWidth = max(width * 0.66, 96)
+        return -glowWidth + (width + glowWidth * 1.25) * phase
     }
 
     private var baseGradient: Gradient {
         Gradient(colors: [
-            palette.orange.opacity(palette.isDark ? 0.62 : 0.48),
-            palette.accent.opacity(palette.isDark ? 0.52 : 0.42),
-            palette.blue.opacity(palette.isDark ? 0.60 : 0.48)
+            Color.white.opacity(palette.isDark ? 0.05 : 0.44),
+            Color.gray.opacity(palette.isDark ? 0.18 : 0.20),
+            Color.white.opacity(palette.isDark ? 0.04 : 0.34)
         ])
     }
 
-    private var glowGradient: Gradient {
+    private var scanGlowGradient: Gradient {
         Gradient(colors: [
             Color.clear,
-            palette.orange.opacity(palette.isDark ? 0.16 : 0.22),
-            Color.white.opacity(palette.isDark ? 0.34 : 0.54),
-            palette.blue.opacity(palette.isDark ? 0.20 : 0.28),
-            Color.clear
+            palette.orange.opacity(palette.isDark ? 0.16 : 0.12),
+            palette.orange.opacity(palette.isDark ? 0.50 : 0.38),
+            Color(red: 0.80, green: 0.94, blue: 0.32).opacity(palette.isDark ? 0.54 : 0.40),
+            palette.accent.opacity(palette.isDark ? 0.56 : 0.42),
+            Color(red: 0.20, green: 0.86, blue: 0.78).opacity(palette.isDark ? 0.54 : 0.40),
+            palette.blue.opacity(palette.isDark ? 0.56 : 0.42)
         ])
     }
+
+    private var scanCoreGlowGradient: Gradient {
+        Gradient(colors: [
+            Color.clear,
+            palette.orange.opacity(palette.isDark ? 0.10 : 0.08),
+            palette.orange.opacity(palette.isDark ? 0.34 : 0.24),
+            Color(red: 0.82, green: 0.96, blue: 0.36).opacity(palette.isDark ? 0.38 : 0.26),
+            palette.accent.opacity(palette.isDark ? 0.40 : 0.28),
+            Color(red: 0.18, green: 0.82, blue: 0.76).opacity(palette.isDark ? 0.38 : 0.26),
+            palette.blue.opacity(palette.isDark ? 0.40 : 0.28)
+        ])
+    }
+
+    private var glowGradient: Gradient { scanGlowGradient }
+    private var coreGlowGradient: Gradient { scanCoreGlowGradient }
 
     private func bandEdges(for route: PowerFlowRoute) -> (sourceTop: CGFloat, sourceBottom: CGFloat, destinationTop: CGFloat, destinationBottom: CGFloat) {
         let source = laneFrame(index: route.sourceIndex, count: sourceCount, opposingCount: destinationCount, opposingIndex: route.destinationIndex, route: route)
@@ -1315,15 +1623,43 @@ private struct SankeyPowerBands: View {
     private func bandPath(width: CGFloat, sourceTop: CGFloat, sourceBottom: CGFloat, destinationTop: CGFloat, destinationBottom: CGFloat) -> Path {
         var path = Path()
         let curve = width * 0.42
-        let startTop = CGPoint(x: 0, y: sourceTop)
-        let startBottom = CGPoint(x: 0, y: sourceBottom)
-        let endTop = CGPoint(x: width, y: destinationTop)
-        let endBottom = CGPoint(x: width, y: destinationBottom)
+        let sourceRadius = min((sourceBottom - sourceTop) * 0.34, 12)
+        let destinationRadius = min((destinationBottom - destinationTop) * 0.34, 12)
+        let startTop = CGPoint(x: sourceRadius, y: sourceTop)
+        let startBottom = CGPoint(x: sourceRadius, y: sourceBottom)
+        let endTop = CGPoint(x: width - destinationRadius, y: destinationTop)
+        let endBottom = CGPoint(x: width - destinationRadius, y: destinationBottom)
 
         path.move(to: startTop)
         path.addCurve(to: endTop, control1: CGPoint(x: curve, y: sourceTop), control2: CGPoint(x: width - curve, y: destinationTop))
-        path.addLine(to: endBottom)
+        path.addQuadCurve(to: CGPoint(x: width, y: destinationTop + destinationRadius), control: CGPoint(x: width, y: destinationTop))
+        path.addLine(to: CGPoint(x: width, y: destinationBottom - destinationRadius))
+        path.addQuadCurve(to: endBottom, control: CGPoint(x: width, y: destinationBottom))
         path.addCurve(to: startBottom, control1: CGPoint(x: width - curve, y: destinationBottom), control2: CGPoint(x: curve, y: sourceBottom))
+        path.addQuadCurve(to: CGPoint(x: 0, y: sourceBottom - sourceRadius), control: CGPoint(x: 0, y: sourceBottom))
+        path.addLine(to: CGPoint(x: 0, y: sourceTop + sourceRadius))
+        path.addQuadCurve(to: startTop, control: CGPoint(x: 0, y: sourceTop))
+        path.closeSubpath()
+        return path
+    }
+
+    private func splitBranchPath(width: CGFloat, junctionX: CGFloat, destinationTop: CGFloat, destinationBottom: CGFloat) -> Path {
+        var path = Path()
+        let destinationRadius = min((destinationBottom - destinationTop) * 0.34, 12)
+        let curve = max((width - junctionX) * 0.36, 24)
+        let splitInset: CGFloat = 6
+        let startTop = CGPoint(x: junctionX - splitInset, y: destinationTop)
+        let startBottom = CGPoint(x: junctionX - splitInset, y: destinationBottom)
+        let endTop = CGPoint(x: width - destinationRadius, y: destinationTop)
+        let endBottom = CGPoint(x: width - destinationRadius, y: destinationBottom)
+
+        path.move(to: startTop)
+        path.addCurve(to: endTop, control1: CGPoint(x: junctionX + curve, y: destinationTop), control2: CGPoint(x: width - curve, y: destinationTop))
+        path.addQuadCurve(to: CGPoint(x: width, y: destinationTop + destinationRadius), control: CGPoint(x: width, y: destinationTop))
+        path.addLine(to: CGPoint(x: width, y: destinationBottom - destinationRadius))
+        path.addQuadCurve(to: endBottom, control: CGPoint(x: width, y: destinationBottom))
+        path.addCurve(to: startBottom, control1: CGPoint(x: width - curve, y: destinationBottom), control2: CGPoint(x: junctionX + curve, y: destinationBottom))
+        path.addQuadCurve(to: startTop, control: CGPoint(x: junctionX - splitInset * 2, y: (destinationTop + destinationBottom) / 2))
         path.closeSubpath()
         return path
     }
@@ -1381,8 +1717,8 @@ private struct AnimatedPowerBand: View {
             let width = proxy.size.width
             TimelineView(.animation(minimumInterval: 1 / 30, paused: false)) { timeline in
                 let phase = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 4.8) / 4.8
-                let glowWidth = max(width * 0.34, 48)
-                let xOffset = -glowWidth + (width + glowWidth * 2) * phase
+                let glowWidth = max(width * 0.54, 78)
+                let xOffset = -glowWidth + (width + glowWidth * 1.35) * phase
 
                 ZStack {
                     RoundedRectangle(cornerRadius: height < 40 ? 8 : 12, style: .continuous)
@@ -1433,10 +1769,10 @@ private struct AnimatedPowerBand: View {
                 LinearGradient(
                     colors: [
                         Color.clear,
-                        palette.orange.opacity(palette.isDark ? 0.12 : 0.18),
-                        Color.white.opacity(palette.isDark ? 0.28 : 0.46),
-                        palette.blue.opacity(palette.isDark ? 0.16 : 0.24),
-                        Color.clear
+                        palette.orange.opacity(palette.isDark ? 0.08 : 0.06),
+                        palette.orange.opacity(palette.isDark ? 0.16 : 0.12),
+                        palette.accent.opacity(palette.isDark ? 0.18 : 0.14),
+                        palette.blue.opacity(palette.isDark ? 0.18 : 0.13)
                     ],
                     startPoint: .leading,
                     endPoint: .trailing
@@ -1658,6 +1994,52 @@ private struct CapsuleOption: View {
                 .clipShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct StatusBarIconOption: View {
+    @Environment(\.dashboardPalette) private var palette
+    let icon: StatusBarIconPreset
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            statusIcon
+                .frame(width: 18, height: 18)
+                .padding(6)
+                .foregroundStyle(selected ? palette.primaryText : palette.secondaryText)
+                .background(selected ? palette.accent.opacity(0.22) : palette.chipBackground)
+                .overlay(Circle().strokeBorder(selected ? palette.accent.opacity(0.75) : Color.clear, lineWidth: 0.8))
+                .clipShape(Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help("状态栏图标")
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        if let image = statusBarPreviewImage(for: icon) {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFit()
+        } else {
+            Image(systemName: "pawprint.fill")
+                .font(.system(size: 13, weight: .bold))
+        }
+    }
+
+    private func statusBarPreviewImage(for icon: StatusBarIconPreset) -> NSImage? {
+let urls = [
+    Bundle.main.url(forResource: icon.resourceName, withExtension: "png", subdirectory: "StatusBarIcons"),
+    Bundle.main.url(forResource: icon.resourceName, withExtension: "png", subdirectory: "Resources/StatusBarIcons"),
+    Bundle.main.url(forResource: icon.resourceName, withExtension: "png"),
+    Bundle.main.url(forResource: icon.resourceName, withExtension: "eps", subdirectory: "StatusBarIcons"),
+    Bundle.main.url(forResource: icon.resourceName, withExtension: "eps", subdirectory: "Resources/StatusBarIcons"),
+    Bundle.main.url(forResource: icon.resourceName, withExtension: "eps")
+]
+        return urls.compactMap { $0 }.compactMap(NSImage.init(contentsOf:)).first
     }
 }
 

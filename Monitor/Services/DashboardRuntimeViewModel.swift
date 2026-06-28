@@ -8,11 +8,11 @@ struct DashboardProcess: Identifiable, Hashable, Sendable {
     let pid: Int32
     let name: String
     let cpuPercent: Double
-    let memoryPercent: Double
+    let memoryBytes: UInt64
 
     var id: Int32 { pid }
     var cpuDisplay: String { String(format: "%.1f%%", cpuPercent) }
-    var memoryDisplay: String { String(format: "%.1f%%", memoryPercent) }
+    var memoryDisplay: String { ByteFormatting.formatBytes(memoryBytes, decimals: memoryBytes >= 1_073_741_824 ? 1 : 0) }
 }
 
 struct DashboardMemoryFallback: Sendable {
@@ -31,6 +31,14 @@ struct DashboardStorageFallback: Sendable {
 
 private struct ProcessUsageSample: Sendable {
     let totalCPUTime: UInt64
+    let timestamp: TimeInterval
+}
+
+private struct ProcessInstantSample: Sendable {
+    let pid: Int32
+    let name: String
+    let totalCPUTime: UInt64
+    let memoryBytes: UInt64
     let timestamp: TimeInterval
 }
 
@@ -371,51 +379,104 @@ final class DashboardRuntimeViewModel: ObservableObject {
     }
 
     nonisolated private static func readTopProcesses() -> [DashboardProcess] {
-        let pids = listedProcessIDs()
-        guard !pids.isEmpty else { return [] }
-
-        let now = ProcessInfo.processInfo.systemUptime
-        let physicalMemory = max(ProcessInfo.processInfo.physicalMemory, 1)
         let currentPID = Int32(ProcessInfo.processInfo.processIdentifier)
+        let firstPIDs = listedProcessIDs()
+        guard !firstPIDs.isEmpty else { return [] }
+
+        let firstTimestamp = ProcessInfo.processInfo.systemUptime
+        let firstSamples = processInstantSamples(for: firstPIDs, excluding: currentPID, timestamp: firstTimestamp)
+        guard !firstSamples.isEmpty else { return [] }
 
         let previousSamples = ProcessUsageCache.snapshot()
-
-        var nextSamples: [Int32: ProcessUsageSample] = [:]
-        var processes: [DashboardProcess] = []
-
-        for pid in pids where pid > 0 && pid != currentPID {
-            guard let allInfo = processAllInfo(for: pid) else { continue }
-
-            let taskInfo = allInfo.ptinfo
-            let cpuTime = taskInfo.pti_total_user &+ taskInfo.pti_total_system
-            nextSamples[pid] = ProcessUsageSample(totalCPUTime: cpuTime, timestamp: now)
-
-            let memoryPercent = (Double(taskInfo.pti_resident_size) / Double(physicalMemory)) * 100
-            let cpuPercent: Double
-            if let previous = previousSamples[pid], now > previous.timestamp, cpuTime >= previous.totalCPUTime {
-                let elapsed = now - previous.timestamp
-                let cpuSeconds = Double(cpuTime - previous.totalCPUTime) / 1_000_000_000
-                cpuPercent = min(max(cpuSeconds / elapsed * 100, 0), 999)
-            } else {
-                cpuPercent = 0
-            }
-
-            let name = processName(from: allInfo, pid: pid)
-            guard !name.isEmpty, cpuPercent > 0.1 || memoryPercent > 0.1 else { continue }
-            processes.append(DashboardProcess(pid: pid, name: name, cpuPercent: cpuPercent, memoryPercent: memoryPercent))
+        let reusablePreviousCount = firstSamples.reduce(0) { count, sample in
+            guard let previous = previousSamples[sample.pid], sample.totalCPUTime >= previous.totalCPUTime else { return count }
+            let elapsed = sample.timestamp - previous.timestamp
+            return elapsed >= 0.75 && elapsed <= 3.75 ? count + 1 : count
         }
 
+        let baselineSamples: [Int32: ProcessUsageSample]
+        let finalSamples: [ProcessInstantSample]
+
+        if reusablePreviousCount >= max(6, firstSamples.count / 6) {
+            // 前台连续刷新时复用上一帧样本，窗口约等于 2s，更接近活动监视器的实时 %CPU。
+            baselineSamples = previousSamples
+            finalSamples = firstSamples
+        } else {
+            // 从后台/首次打开时旧样本会把瞬时 CPU 摊薄；这里主动做一个短窗口采样。
+            // 先重新枚举 PID，避免高负载进程在两次采样之间才出现。
+            usleep(1_000_000)
+            let secondPIDs = listedProcessIDs()
+            let secondTimestamp = ProcessInfo.processInfo.systemUptime
+            let secondSamples = processInstantSamples(for: secondPIDs.isEmpty ? firstPIDs : secondPIDs, excluding: currentPID, timestamp: secondTimestamp)
+            baselineSamples = Dictionary(uniqueKeysWithValues: firstSamples.map {
+                ($0.pid, ProcessUsageSample(totalCPUTime: $0.totalCPUTime, timestamp: $0.timestamp))
+            })
+            finalSamples = secondSamples.isEmpty ? firstSamples : secondSamples
+        }
+
+        let nextSamples = Dictionary(uniqueKeysWithValues: finalSamples.map {
+            ($0.pid, ProcessUsageSample(totalCPUTime: $0.totalCPUTime, timestamp: $0.timestamp))
+        })
         ProcessUsageCache.replace(with: nextSamples)
+
+        let processes = finalSamples.compactMap { sample -> DashboardProcess? in
+            guard let previous = baselineSamples[sample.pid],
+                  sample.timestamp > previous.timestamp,
+                  sample.totalCPUTime >= previous.totalCPUTime
+            else { return nil }
+
+            let elapsed = sample.timestamp - previous.timestamp
+            guard elapsed > 0 else { return nil }
+            // ri_user_time + ri_system_time 是纳秒；100% 表示占满一个 CPU 核心，和活动监视器口径一致。
+            let cpuSeconds = Double(sample.totalCPUTime - previous.totalCPUTime) / 1_000_000_000
+            let cpuPercent = min(max(cpuSeconds / elapsed * 100, 0), 999)
+            guard !sample.name.isEmpty, cpuPercent > 0.05 || sample.memoryBytes > 1_048_576 else { return nil }
+            return DashboardProcess(pid: sample.pid, name: sample.name, cpuPercent: cpuPercent, memoryBytes: sample.memoryBytes)
+        }
 
         return processes
             .sorted { lhs, rhs in
-                if lhs.cpuPercent == rhs.cpuPercent {
-                    return lhs.memoryPercent > rhs.memoryPercent
+                if abs(lhs.cpuPercent - rhs.cpuPercent) < 0.05 {
+                    return lhs.memoryBytes > rhs.memoryBytes
                 }
                 return lhs.cpuPercent > rhs.cpuPercent
             }
             .prefix(5)
             .map { $0 }
+    }
+
+    nonisolated private static func processInstantSamples(for pids: [Int32], excluding currentPID: Int32, timestamp: TimeInterval) -> [ProcessInstantSample] {
+        var samples: [ProcessInstantSample] = []
+        samples.reserveCapacity(min(pids.count, 160))
+
+        for pid in pids where pid > 0 && pid != currentPID {
+            guard let allInfo = processAllInfo(for: pid) else { continue }
+            guard let usage = processResourceUsage(for: pid, fallbackInfo: allInfo) else { continue }
+            let name = processName(from: allInfo, pid: pid)
+            guard !name.isEmpty else { continue }
+            samples.append(ProcessInstantSample(pid: pid, name: name, totalCPUTime: usage.totalCPUTime, memoryBytes: usage.memoryBytes, timestamp: timestamp))
+        }
+
+        return samples
+    }
+
+    nonisolated private static func processResourceUsage(for pid: Int32, fallbackInfo: proc_taskallinfo) -> (totalCPUTime: UInt64, memoryBytes: UInt64)? {
+        var usage = rusage_info_v4()
+        let usageResult = withUnsafeMutablePointer(to: &usage) { usagePointer -> Int32 in
+            let rawPointer = UnsafeMutableRawPointer(usagePointer)
+            let rusagePointer = rawPointer.assumingMemoryBound(to: rusage_info_t?.self)
+            return proc_pid_rusage(pid, RUSAGE_INFO_V4, rusagePointer)
+        }
+        if usageResult == 0 {
+            let total = usage.ri_user_time &+ usage.ri_system_time
+            let memory = UInt64(usage.ri_resident_size)
+            return (total, memory)
+        }
+
+        let taskInfo = fallbackInfo.ptinfo
+        let total = taskInfo.pti_total_user &+ taskInfo.pti_total_system
+        let memory = UInt64(taskInfo.pti_resident_size)
+        return total > 0 ? (total, memory) : nil
     }
 
     nonisolated private static func listedProcessIDs() -> [Int32] {

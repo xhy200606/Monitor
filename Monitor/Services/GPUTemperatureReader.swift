@@ -12,7 +12,8 @@ final class GPUTemperatureReader: @unchecked Sendable {
 
     private let gpuTemperatureKeys = [
         // Intel / AMD dGPU 常见 SMC key
-        "TG0D", "TG0P", "TG0H", "TG0T", "TG0M", "TG0F",
+        "TG0D", "TG0P", "TG0H", "TG0T", "TG0M", "TG0F", "TG0E",
+        "TG1D", "TG1P", "TG1H", "TG1T", "TG1M", "TG1F", "TG1E",
         // Apple Silicon / AGX 常见候选 key，不同机型暴露情况不同
         "Tg0D", "Tg0P", "Tg0H", "Tg0T", "Tg0G", "Tg1G",
         "Tg05", "Tg15", "Tp0P", "Tp0G", "Tp1G",
@@ -211,6 +212,7 @@ private struct SMCGPUKeyData: Sendable {
     var vers: SMCGPUKeyDataVers = SMCGPUKeyDataVers()
     var pLimitData: SMCGPUKeyDataPLimitData = SMCGPUKeyDataPLimitData()
     var keyInfo: SMCGPUKeyDataKeyInfo = SMCGPUKeyDataKeyInfo()
+    var padding: UInt16 = 0
     var result: UInt8 = 0
     var status: UInt8 = 0
     var data8: UInt8 = 0

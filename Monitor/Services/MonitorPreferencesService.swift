@@ -17,6 +17,7 @@ enum MonitorAppearance: String {
 enum MonitorPreferencesService {
     nonisolated private static let languageKey = "appLanguage"
     nonisolated private static let appearanceKey = "appearanceMode"
+    nonisolated static let statusBarIconKey = "statusBarIcon"
     nonisolated static let powerRefreshIntervalKey = "powerRefreshInterval"
     nonisolated static let bluetoothRefreshIntervalKey = "bluetoothRefreshInterval"
 
@@ -45,6 +46,19 @@ enum MonitorPreferencesService {
 
     nonisolated static func saveAppearance(_ appearance: MonitorAppearance) {
         UserDefaults.standard.set(appearance.rawValue, forKey: appearanceKey)
+    }
+
+    nonisolated static func statusBarIcon() -> StatusBarIconPreset {
+        guard let raw = UserDefaults.standard.string(forKey: statusBarIconKey),
+              let icon = StatusBarIconPreset(rawValue: raw) else {
+            return .siameseCat
+        }
+        return icon
+    }
+
+    nonisolated static func saveStatusBarIcon(_ icon: StatusBarIconPreset) {
+        UserDefaults.standard.set(icon.rawValue, forKey: statusBarIconKey)
+        NotificationCenter.default.post(name: .monitorStatusBarIconDidChange, object: nil)
     }
 
     nonisolated static func powerRefreshInterval() -> TimeInterval {
@@ -93,6 +107,7 @@ enum MonitorPreferencesService {
     nonisolated static func clearAll() {
         UserDefaults.standard.removeObject(forKey: languageKey)
         UserDefaults.standard.removeObject(forKey: appearanceKey)
+        UserDefaults.standard.removeObject(forKey: statusBarIconKey)
         UserDefaults.standard.removeObject(forKey: powerRefreshIntervalKey)
         UserDefaults.standard.removeObject(forKey: bluetoothRefreshIntervalKey)
     }
@@ -101,4 +116,19 @@ enum MonitorPreferencesService {
         let candidate = value > 0 ? value : defaultValue
         return min(max(candidate, range.lowerBound), range.upperBound)
     }
+}
+
+enum StatusBarIconPreset: String, CaseIterable, Identifiable {
+    case siameseCat = "暹罗猫"
+    case calicoCat = "三花猫"
+    case orangeCat = "橘猫"
+    case ragdollCat = "布偶猫"
+
+    var id: String { rawValue }
+    var title: String { rawValue }
+    var resourceName: String { rawValue }
+}
+
+extension Notification.Name {
+    nonisolated static let monitorStatusBarIconDidChange = Notification.Name("MonitorStatusBarIconDidChange")
 }
