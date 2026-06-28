@@ -2,7 +2,7 @@
 //  MonitorApp.swift
 //  Monitor
 //
-//  Created by 陈彦杭 on 2026/3/22.
+//  Created by Chananyah on 2026/6/22.
 //
 
 import AppKit
